@@ -1,10 +1,13 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -42,10 +45,28 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	defer file.Close()
-	mediaType := header.Header.Get("Content-Type")
-	filebytes, err := io.ReadAll(file)
+	mediaType, _, err := mime.ParseMediaType(header.Header.Get("Content-Type"))
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "issue with converting file to bytes", err)
+		respondWithError(w, http.StatusInternalServerError, "Unable to parse media Type from Content-Type header", err)
+		return
+	}
+	if mediaType != "image/jpeg" && mediaType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "invalid media type.", err)
+		return
+	}
+
+	fileExtention := strings.Split(mediaType, "/")[1]
+	fileName := videoIDString + "." + fileExtention
+	thumbFilePath := filepath.Join(cfg.assetsRoot, fileName)
+
+	serverThumbFile, err := os.Create(thumbFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "issue creating thumnail file", err)
+		return
+	}
+	_, err = io.Copy(serverThumbFile, file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "issue creating thumnail file", err)
 		return
 	}
 
@@ -58,14 +79,13 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "not users video", err)
 		return
 	}
-	rawThumbnailImageData := base64.StdEncoding.EncodeToString(filebytes)
-	dataURL := fmt.Sprintf("data:%v;base64,%v", mediaType, rawThumbnailImageData)
+	newThumbURL := fmt.Sprintf("http://localhost:%v/assets/%v.%v", cfg.port, videoIDString, fileExtention)
 
 	updVideo := database.Video{
 		ID:                videoID,
 		CreatedAt:         dbVideo.CreatedAt,
 		UpdatedAt:         time.Now(),
-		ThumbnailURL:      &dataURL,
+		ThumbnailURL:      &newThumbURL,
 		CreateVideoParams: dbVideo.CreateVideoParams,
 	}
 
