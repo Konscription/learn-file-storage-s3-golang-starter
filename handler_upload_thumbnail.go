@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
@@ -55,8 +57,16 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	randFileNamebytes := make([]byte, 32)
+	_, err = rand.Read(randFileNamebytes)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "issue generating random number", err)
+		return
+	}
+	randomIDString := base64.RawURLEncoding.EncodeToString(randFileNamebytes)
+
 	fileExtention := strings.Split(mediaType, "/")[1]
-	fileName := videoIDString + "." + fileExtention
+	fileName := randomIDString + "." + fileExtention
 	thumbFilePath := filepath.Join(cfg.assetsRoot, fileName)
 
 	serverThumbFile, err := os.Create(thumbFilePath)
@@ -64,6 +74,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusInternalServerError, "issue creating thumnail file", err)
 		return
 	}
+	defer serverThumbFile.Close()
 	_, err = io.Copy(serverThumbFile, file)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "issue creating thumnail file", err)
@@ -79,7 +90,8 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "not users video", err)
 		return
 	}
-	newThumbURL := fmt.Sprintf("http://localhost:%v/assets/%v.%v", cfg.port, videoIDString, fileExtention)
+
+	newThumbURL := fmt.Sprintf("http://localhost:%v/assets/%v.%v", cfg.port, randomIDString, fileExtention)
 
 	updVideo := database.Video{
 		ID:                videoID,
