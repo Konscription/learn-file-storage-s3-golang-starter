@@ -1,12 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"io"
+	"log"
+	"math"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -14,37 +20,6 @@ import (
 )
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
-	/**
-	handler to store video files in S3.
-	Images will stay on the local file system for now.
-	I recommend using the image upload handler as a reference.
-	* Set an upload limit of 1 GB (1 << 30 bytes) using http.MaxBytesReader.
-	* Extract the videoID from the URL path parameters and parse it as a UUID
-	* Authenticate the user to get a userID
-	* Get the video metadata from the database, if the user is not the video owner, return a http.StatusUnauthorized response
-	* Parse the uploaded video file from the form data
-		- Use (http.Request).FormFile with the key "video" to get a multipart.File in memory
-		- Remember to defer closing the file with (os.File).Close - we don't want any memory leaks
-	* Validate the uploaded file to ensure it's an MP4 video
-		- Use mime.ParseMediaType and "video/mp4" as the MIME type
-	* Save the uploaded file to a temporary file on disk.
-		- Use os.CreateTemp to create a temporary file.
-		- I passed in an empty string for the directory to use the system default, and the name "tubely-upload.mp4"
-		- (but you can use whatever you want)
-	* defer remove the temp file with os.Remove
-	* defer close the temp file (defer is LIFO, so it will close before the remove)
-	* io.Copy the contents over from the wire to the temp file
-	* Reset the tempFile's file pointer to the beginning with .Seek(0, io.SeekStart)
-		- this will allow us to read the file again from the beginning
-	* Put the object into S3 using PutObject. You'll need to provide:
-		- The bucket name
-		- The file key. Use the same <random-32-byte-hex>.ext format as the key. e.g. 1a2b3c4d5e6f7890abcd1234ef567890.mp4
-		- The file contents (body). The temp file is an os.File which implements io.Reader
-		- Content type, which is the MIME type of the file.
-	* Update the VideoURL of the video record in the database with the S3 bucket and key.
-		- S3 URLs are in the format https://<bucket-name>.s3.<region>.amazonaws.com/<key>.
-		- Make sure you use the correct region and bucket name!
-	**/
 	http.MaxBytesReader(w, r.Body, 1<<30) // Set upload limit to 1 GB
 
 	videoIDString := r.PathValue("videoID")
@@ -110,7 +85,21 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Unable to seek to the beginning of the temporary file", err)
 		return
 	}
-
+	// Get the aspect ratio of the video
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to get video aspect ratio", err)
+		return
+	}
+	var videoPrefix string
+	switch aspectRatio {
+	case "16:9":
+		videoPrefix = "landscape"
+	case "9:16":
+		videoPrefix = "portrait"
+	default:
+		videoPrefix = "other"
+	}
 	// Generate a random file name for the S3 key
 	randomIDBytes := make([]byte, 32)
 	_, err = rand.Read(randomIDBytes)
@@ -119,7 +108,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	randomIDString := base64.RawURLEncoding.EncodeToString(randomIDBytes)
-	s3Key := randomIDString + ".mp4"
+	s3Key := videoPrefix + "/" + randomIDString + ".mp4"
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &s3Key,
@@ -139,4 +128,47 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	respondWithJSON(w, http.StatusOK, map[string]string{"videoURL": *video.VideoURL})
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	// takes a file path and returns the aspect ratio as a string
+	execCommand := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+	output := bytes.Buffer{}
+	execCommand.Stdout = &output
+	err := execCommand.Run()
+	if err != nil {
+		return "", err
+	}
+	//Unmarshal the stdout of the command from the buffer's .Bytes
+	// into a JSON struct so that you can get the width and height fields.
+	var result map[string]any
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		return "", err
+	}
+	streams, ok := result["streams"].([]any)
+	if !ok || len(streams) == 0 {
+		return "", nil // No streams found
+	}
+	stream := streams[0].(map[string]any)
+	widthVal, widthOk := stream["width"].(float64)
+	heightVal, heightOk := stream["height"].(float64)
+	if !widthOk || !heightOk {
+		return "", nil // Width or height not found
+	}
+
+	return formatAspectRatio(widthVal, heightVal), nil
+}
+
+func formatAspectRatio(width float64, height float64) string {
+	ratio := (width / height)
+	if math.Abs(ratio-float64(16)/float64(9)) <= 0.01 {
+		log.Println("Aspect ratio 16:9: " + fmt.Sprintf("%f", ratio))
+		return "16:9"
+	} else if math.Abs(ratio-float64(9)/float64(16)) <= 0.01 {
+		log.Println("Aspect ratio 9:16: " + fmt.Sprintf("%f", ratio))
+		return "9:16"
+	} else {
+		log.Println("Aspect ratio other: " + fmt.Sprintf("%f", ratio))
+		return "other"
+	}
 }
