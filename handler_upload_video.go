@@ -85,8 +85,23 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Unable to seek to the beginning of the temporary file", err)
 		return
 	}
+
+	// Process the video for fast start
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to process video for fast start", err)
+		return
+	}
+	// Reopen the processed file
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to open processed video file", err)
+		return
+	}
+	defer os.Remove(processedFile.Name())
+	defer processedFile.Close()
 	// Get the aspect ratio of the video
-	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	aspectRatio, err := getVideoAspectRatio(processedFile.Name())
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to get video aspect ratio", err)
 		return
@@ -107,12 +122,13 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Issue generating random number", err)
 		return
 	}
+
 	randomIDString := base64.RawURLEncoding.EncodeToString(randomIDBytes)
 	s3Key := videoPrefix + "/" + randomIDString + ".mp4"
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &s3Key,
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: &mediaType,
 	})
 	if err != nil {
@@ -171,4 +187,29 @@ func formatAspectRatio(width float64, height float64) string {
 		log.Println("Aspect ratio other: " + fmt.Sprintf("%f", ratio))
 		return "other"
 	}
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	// takes a file path as input and creates and returns a new path
+	// to a file with "fast start" encoding.
+	// *create a new string for the output file path.
+	// append .processing to the input file (should be the path to the temp file)
+	outputFilePath := filePath + ".processing"
+	execCommand := exec.Command(
+		"ffmpeg",
+		"-i",
+		filePath,
+		"-c",
+		"copy",
+		"-movflags",
+		"faststart",
+		"-f",
+		"mp4",
+		outputFilePath)
+	err := execCommand.Run()
+	if err != nil {
+		return "", fmt.Errorf("error processing video for fast start: %w", err)
+	}
+	// return the output file path
+	return outputFilePath, nil
 }
